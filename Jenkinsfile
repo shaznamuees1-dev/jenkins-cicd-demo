@@ -50,8 +50,11 @@ pipeline {
         }
 
         stage('Deploy') {
-            steps {
-                sshagent(['ec2-ssh-key']) {
+    when {
+        branch 'main'
+    }
+    steps {
+        sshagent(['ec2-ssh-key']) {
                     sh """
                         ssh -o StrictHostKeyChecking=no ubuntu@${EC2_HOST} '
                         docker pull ${DOCKER_IMAGE}:${BUILD_TAG} &&
