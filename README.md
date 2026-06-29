@@ -1,47 +1,47 @@
-# platform-service — K8s + Terraform Mini-Platform
+# 🔧 jenkins-cicd-demo — Self-Hosted Jenkins CI/CD Pipeline
 
-A small FastAPI service deployed to a local Kubernetes cluster via Helm, with all AWS infrastructure (VPC, subnet, EC2) provisioned entirely as code through Terraform — including a full CI/CD pipeline for infrastructure changes.
+A self-hosted Jenkins server running on AWS EC2, with a full declarative pipeline: parallel lint/test, Docker build and push to Docker Hub, SSH-based deployment, and Slack notifications — all triggered automatically via a Multibranch Pipeline connected to GitHub.
 
 ---
 
 ## What This Project Demonstrates
 
-- **Kubernetes fundamentals** — Deployments, Services, health probes, rolling updates, self-healing
-- **Helm** — packaging Kubernetes manifests into a reusable, versioned chart
-- **Terraform** — provisioning a complete custom VPC, subnet, internet gateway, route table, security group, and EC2 instance as code
-- **Remote state management** — S3 backend + DynamoDB locking for safe, shared Terraform state
-- **GitOps-style CI/CD** — `terraform plan` runs automatically on every PR, `terraform apply` runs automatically on merge to `main`
-- **Reproducibility** — proven by fully destroying and rebuilding all 8 AWS resources from code alone
+- **Self-hosted CI/CD** — Jenkins running in Docker on EC2, configured from scratch (plugins, credentials, Multibranch Pipeline)
+- **Declarative Jenkinsfile** — parallel stages, environment variables, conditional branch logic
+- **Secure credential management** — GitHub token, Docker Hub token, SSH key, and Slack webhook all stored as Jenkins credentials, never hardcoded
+- **Docker-in-Jenkins** — Jenkins builds and pushes Docker images from inside its own container
+- **Automated SSH deployment** — pipeline deploys directly to a remote EC2 host via `sshagent`
+- **Slack integration** — real-time build success/failure notifications
+- **Branch-aware deployment** — deploy stage only runs on `main`, keeping feature branches safe from accidental production deploys
 
 ---
 
 ## Architecture
 
 ```mermaid
-flowchart TB
-    subgraph K8s["Local Kubernetes (kind)"]
-        A[Helm Chart] --> B[Deployment: 2 replicas]
-        B --> C[Service: ClusterIP]
-        B --> D[Liveness/Readiness Probes]
-    end
-
-    subgraph AWS["AWS — Provisioned via Terraform"]
-        E[Custom VPC] --> F[Public Subnet]
-        F --> G[EC2 Instance]
-        E --> H[Internet Gateway]
-        H --> I[Route Table]
-        I --> F
-        G --> J[Security Group]
-    end
-
-    subgraph CI["GitHub Actions"]
-        K[Pull Request] --> L[terraform plan]
-        M[Merge to main] --> N[terraform apply]
-    end
-
-    L --> AWS
-    N --> AWS
+flowchart LR
+    A[Push to GitHub] --> B[Jenkins Multibranch Pipeline]
+    B --> C[Checkout]
+    C --> D{Lint & Test}
+    D -->|parallel| E[Lint]
+    D -->|parallel| F[Test]
+    E --> G[Build Docker Image]
+    F --> G
+    G --> H[Push to Docker Hub]
+    H --> I{Branch == main?}
+    I -->|yes| J[SSH Deploy to EC2]
+    I -->|no| K[Skip Deploy]
+    J --> L[Slack Notification]
+    K --> L
 ```
+
+---
+
+## Pipeline in Action
+
+![Jenkins Blue Ocean pipeline view showing all stages passing](./blue-ocean-pipeline.png)
+
+All five stages — Checkout, Lint & Test (parallel), Build & Push Docker Image, Deploy — completing successfully, with the actual deploy and Slack notification commands visible in the log.
 
 ---
 
@@ -50,65 +50,67 @@ flowchart TB
 | Layer | Technology |
 |---|---|
 | App | FastAPI (Python) |
+| CI/CD | Jenkins (self-hosted, Docker) |
+| Pipeline | Declarative Jenkinsfile (Groovy DSL) |
 | Containerization | Docker (multi-stage build) |
-| Orchestration | Kubernetes (via `kind`) |
-| Packaging | Helm |
-| Infrastructure as Code | Terraform |
-| State Backend | AWS S3 + DynamoDB |
-| CI/CD | GitHub Actions |
-| Cloud | AWS (VPC, EC2) |
+| Image Registry | Docker Hub |
+| Deployment Target | AWS EC2 |
+| Notifications | Slack (Incoming Webhook) |
+| Source Control | GitHub (Multibranch Pipeline) |
 
 ---
 
-## Key Features
+## Pipeline Stages
 
-- **Health probes** — liveness and readiness checks on `/health`, verified by simulating pod failure and scale-to-zero/back-up tests
-- **Rolling updates with proper image tagging** — versioned tags (`1.0`, `1.1`) instead of `:latest`, enabling reliable `kubectl rollout undo`
-- **Custom VPC networking** — not relying on AWS's default VPC; public subnet, internet gateway, and route table all defined explicitly
-- **Remote Terraform state** — stored in S3 with DynamoDB locking, the same pattern used by real engineering teams
-- **Automated plan/apply gate** — infrastructure changes are reviewed via `plan` on every PR before being allowed to `apply` on merge
+1. **Checkout** — pulls the latest code from the triggering branch
+2. **Lint & Test** (parallel) — runs `flake8` and `pytest` simultaneously to save pipeline time
+3. **Build & Push Docker Image** — builds a multi-stage Docker image, tags it with the Jenkins build number, pushes to Docker Hub
+4. **Deploy** *(main branch only)* — SSHes into the EC2 host, pulls the new image, stops/removes the old container, starts the new one
+5. **Post Actions** — sends a Slack notification reporting success or failure, regardless of outcome
+
+---
+
+## Credentials Used (Jenkins Credentials Store)
+
+| ID | Type | Purpose |
+|---|---|---|
+| `github-creds` | Username/Password | Multibranch Pipeline GitHub access |
+| `dockerhub-creds` | Username/Password | Docker Hub login for image push |
+| `ec2-ssh-key` | SSH Private Key | Deploying to EC2 via SSH |
+| `slack-webhook` | Secret Text | Posting build notifications to Slack |
+
+None of these are hardcoded anywhere in the Jenkinsfile — all referenced by ID and injected at runtime via `withCredentials` / `sshagent`.
 
 ---
 
 ## Local Setup
 
-### Kubernetes (kind + Helm)
+### Run Jenkins
 ```bash
-kind create cluster --name pr-roaster-cluster
-docker build -t platform-service:1.1 .
-kind load docker-image platform-service:1.1 --name pr-roaster-cluster
-helm install platform-release ./platform-chart
-kubectl port-forward service/platform-release-platform-chart 8080:80
+docker run -d -p 8080:8080 -p 50000:50000 --name jenkins \
+  -v jenkins_home:/var/jenkins_home \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  jenkins/jenkins:lts
 ```
 
-### Terraform (AWS infrastructure)
+### App (for local testing outside the pipeline)
 ```bash
-cd terraform
-terraform init
-terraform plan
-terraform apply
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload
 ```
-
----
-
-## CI/CD Pipeline
-
-`.github/workflows/infra.yml` triggers on any change inside `terraform/`:
-
-- **On Pull Request** → `terraform fmt -check`, `validate`, `plan` (read-only preview, no changes applied)
-- **On merge to `main`** → `terraform apply -auto-approve` (infrastructure changes go live)
-
-This enforces that every infrastructure change is reviewed via PR before it can affect real AWS resources.
 
 ---
 
 ## What I Learned
 
-- How Kubernetes Deployments maintain desired state — proven by scaling to 0 and back, watching pods self-heal
-- Why `:latest` image tags break reliable rollback, and how to fix it with versioned tags
-- Setting up Terraform remote state with S3 + DynamoDB locking
-- Migrating existing AWS resources (EC2) into a newly created custom VPC
-- Building a GitOps-style CI/CD gate: plan on PR, apply on merge
+- Setting up a Multibranch Pipeline and connecting it securely to GitHub via a scoped token
+- Why a container needs the Docker CLI **and** matching group permissions (not just the Docker socket mounted) to run `docker build`/`docker push` from inside itself
+- Diagnosing a real GID mismatch between a container's internal `docker` group and the host's actual group owning `/var/run/docker.sock`
+- The difference between the **SSH Build Agents** plugin and the **SSH Agent** plugin — only the latter provides the `sshagent` pipeline step
+- Why `--restart unless-stopped` matters for both the Jenkins container and any deployed app container, especially on infrastructure that can reboot unexpectedly
+- Declarative `when { branch 'main' }` conditions to prevent feature branches from auto-deploying
 
 ---
 
